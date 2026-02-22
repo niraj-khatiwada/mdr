@@ -363,8 +363,9 @@ mod tests {
     }
 }
 
-/// Resolve relative image paths in markdown to absolute file:// URLs.
-/// Handles ![alt](relative/path.png) syntax.
+/// Resolve relative image paths in markdown.
+/// SVG files are rasterized to PNG data URIs (egui_commonmark fails on complex SVGs with <a> tags).
+/// Other images are resolved to absolute file:// URLs.
 fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {
     use regex::Regex;
     let re = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
@@ -379,10 +380,71 @@ fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> Stri
         }
         let abs_path = base_dir.join(src);
         if abs_path.exists() {
+            // SVG files: rasterize to PNG data URI to avoid parsing failures
+            let is_svg = abs_path.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("svg"))
+                .unwrap_or(false);
+            if is_svg {
+                if let Ok(data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
+                    return format!("![{}]({})", alt, data_uri);
+                }
+            }
             format!("![{}](file://{})", alt, abs_path.display())
         } else {
             caps[0].to_string()
         }
     })
     .to_string()
+}
+
+/// Rasterize an SVG file to PNG and return as a base64 data URI.
+/// Caps dimensions at 8192px to avoid GPU texture overflow.
+fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    use std::sync::{Arc, OnceLock};
+
+    const MAX_DIM: f32 = 8192.0;
+
+    let svg_data = std::fs::read_to_string(path)?;
+
+    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fontdb = FONTDB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    });
+
+    let mut options = usvg::Options::default();
+    options.fontdb = Arc::clone(fontdb);
+    let tree = usvg::Tree::from_str(&svg_data, &options)?;
+    let size = tree.size();
+    let svg_w = size.width();
+    let svg_h = size.height();
+
+    if svg_w <= 0.0 || svg_h <= 0.0 {
+        return Err("SVG has zero dimensions".into());
+    }
+
+    // Scale 2x for retina, but cap at MAX_DIM
+    let ideal_scale = 2.0_f32;
+    let max_scale_w = MAX_DIM / svg_w;
+    let max_scale_h = MAX_DIM / svg_h;
+    let scale = ideal_scale.min(max_scale_w).min(max_scale_h);
+
+    let width = (svg_w * scale) as u32;
+    let height = (svg_h * scale) as u32;
+
+    if width == 0 || height == 0 {
+        return Err("SVG too small after scaling".into());
+    }
+
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .ok_or("Failed to create pixmap")?;
+    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let png_data = pixmap.encode_png()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    Ok(format!("data:image/png;base64,{}", b64))
 }
