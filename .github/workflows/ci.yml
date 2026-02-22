@@ -49,6 +49,9 @@ jobs:
       - name: Build (webview only)
         run: cargo build --release --no-default-features --features webview-backend
 
+      - name: Build (tui only)
+        run: cargo build --release --no-default-features --features tui-backend
+
       - name: Run clippy
         run: cargo clippy -- -D warnings
         continue-on-error: true

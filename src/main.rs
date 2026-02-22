@@ -18,8 +18,8 @@ struct Cli {
 
 fn parse_backend(s: &str) -> Result<String, String> {
     match s {
-        "egui" | "webview" => Ok(s.to_string()),
-        _ => Err(format!("unknown backend '{}', expected 'egui' or 'webview'", s)),
+        "egui" | "webview" | "tui" => Ok(s.to_string()),
+        _ => Err(format!("unknown backend '{}', expected 'egui', 'webview', or 'tui'", s)),
     }
 }
 
@@ -47,6 +47,15 @@ fn main() {
         #[cfg(not(feature = "webview-backend"))]
         "webview" => {
             eprintln!("Error: webview backend not compiled. Rebuild with --features webview-backend");
+            process::exit(1);
+        }
+
+        #[cfg(feature = "tui-backend")]
+        "tui" => backend::tui::run(cli.file),
+
+        #[cfg(not(feature = "tui-backend"))]
+        "tui" => {
+            eprintln!("Error: tui backend not compiled. Rebuild with --features tui-backend");
             process::exit(1);
         }
 

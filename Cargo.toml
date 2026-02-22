@@ -5,9 +5,10 @@ edition = "2021"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 
 [features]
-default = ["egui-backend", "webview-backend"]
+default = ["egui-backend", "webview-backend", "tui-backend"]
 egui-backend = ["dep:eframe", "dep:egui_commonmark", "dep:resvg", "dep:usvg", "dep:tiny-skia"]
 webview-backend = ["dep:wry", "dep:tao"]
+tui-backend = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 # Core
@@ -29,3 +30,7 @@ tiny-skia = { version = "0.11", optional = true }
 # webview backend
 wry = { version = "0.50", optional = true }
 tao = { version = "0.33", optional = true }
+
+# tui backend
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
