@@ -1,0 +1,25 @@
+[package]
+name = "mdr"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
+
+[features]
+default = ["egui-backend", "webview-backend"]
+egui-backend = ["dep:eframe", "dep:egui_commonmark"]
+webview-backend = ["dep:wry", "dep:tao"]
+
+[dependencies]
+# Core
+clap = { version = "4", features = ["derive"] }
+comrak = { version = "0.38", default-features = false, features = ["syntect"] }
+notify = "8"
+notify-debouncer-mini = "0.6"
+
+# egui backend
+eframe = { version = "0.33", optional = true }
+egui_commonmark = { version = "0.22", features = ["better_syntax_highlighting", "load-images", "svg"], optional = true }
+
+# webview backend
+wry = { version = "0.50", optional = true }
+tao = { version = "0.33", optional = true }
