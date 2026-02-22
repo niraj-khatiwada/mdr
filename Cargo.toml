@@ -15,7 +15,7 @@ keywords = ["markdown", "viewer", "mermaid", "tui", "webview"]
 default = ["egui-backend", "webview-backend", "tui-backend"]
 egui-backend = ["dep:eframe", "dep:egui_commonmark", "dep:resvg", "dep:usvg", "dep:tiny-skia"]
 webview-backend = ["dep:wry", "dep:tao"]
-tui-backend = ["dep:ratatui", "dep:crossterm", "dep:ratatui-image", "dep:image", "dep:ureq"]
+tui-backend = ["dep:ratatui", "dep:crossterm", "dep:ratatui-image", "dep:image", "dep:ureq", "dep:resvg", "dep:usvg", "dep:tiny-skia"]
 
 [dependencies]
 # Core

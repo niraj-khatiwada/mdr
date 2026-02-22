@@ -584,6 +584,7 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
 }
 
 /// Load an image from a URL, data URI, or local file path.
+/// SVG files are rasterized via resvg/usvg before returning.
 fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     if url.starts_with("data:") {
         // data: URI - decode base64
@@ -598,6 +599,11 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
         } else {
             base_dir.join(url)
         };
+        // SVG files need rasterization
+        if path.extension().and_then(|e| e.to_str()) == Some("svg") {
+            let svg_data = std::fs::read_to_string(&path)?;
+            return rasterize_svg(&svg_data);
+        }
         let img = image::open(&path)?;
         Ok(img)
     }
@@ -607,13 +613,51 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
 fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     // Format: data:[<mediatype>][;base64],<data>
     let comma_pos = uri.find(',').ok_or("Invalid data URI: no comma found")?;
+    let header = &uri[..comma_pos];
     let data_part = &uri[comma_pos + 1..];
     let decoded = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         data_part,
     )?;
+    // SVG data URIs need rasterization
+    if header.contains("image/svg") {
+        let svg_str = String::from_utf8(decoded)?;
+        return rasterize_svg(&svg_str);
+    }
     let img = image::load_from_memory(&decoded)?;
     Ok(img)
+}
+
+/// Rasterize an SVG string to a DynamicImage using resvg/usvg.
+fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    use std::sync::{Arc, OnceLock};
+
+    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fontdb = FONTDB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    });
+
+    let mut options = usvg::Options::default();
+    options.fontdb = Arc::clone(fontdb);
+    let tree = usvg::Tree::from_str(svg_data, &options)?;
+    let size = tree.size();
+    let width = size.width() as u32;
+    let height = size.height() as u32;
+
+    if width == 0 || height == 0 {
+        return Err("SVG has zero dimensions".into());
+    }
+
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .ok_or("Failed to create pixmap")?;
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+
+    // Convert RGBA pixmap to DynamicImage
+    let img = image::RgbaImage::from_raw(width, height, pixmap.data().to_vec())
+        .ok_or("Failed to create image from pixmap")?;
+    Ok(image::DynamicImage::ImageRgba8(img))
 }
 
 /// Load an image from an HTTP(S) URL using ureq.
@@ -988,5 +1032,72 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
         Line::from("")
     } else {
         Line::from(spans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn load_image_svg_local_file() {
+        // Create a minimal SVG file in a temp directory
+        let dir = std::env::temp_dir().join("mdr_test_svg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg_path = dir.join("test.svg");
+        let mut f = std::fs::File::create(&svg_path).unwrap();
+        write!(f, r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="red"/></svg>"#).unwrap();
+
+        let result = load_image("test.svg", &dir);
+        // This should succeed — SVG files must be rasterized before display
+        assert!(result.is_ok(), "load_image should handle SVG files but got: {:?}", result.err());
+        let img = result.unwrap();
+        assert!(img.width() > 0 && img.height() > 0);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_content_elements_with_local_svg() {
+        // Create a temp dir with an SVG and a markdown file referencing it
+        let dir = std::env::temp_dir().join("mdr_test_svg_content");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let svg_path = dir.join("logo.svg");
+        let mut f = std::fs::File::create(&svg_path).unwrap();
+        write!(f, r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="red"/></svg>"#).unwrap();
+
+        let md = "# Hello\n\n![my logo](logo.svg)\n\nSome text after.\n";
+        let md_path = dir.join("test.md");
+        std::fs::write(&md_path, md).unwrap();
+
+        // Build content elements (without a picker, images become placeholders OR succeed via rasterize)
+        let elements = build_content_elements(md, &md_path, &None);
+
+        // Should have parsed lines including the image reference
+        // Without a picker, SVG falls back to placeholder — but the markdown parser should find it
+        let has_image_ref = elements.iter().any(|e| matches!(e, ContentElement::ImagePlaceholder(_)));
+        assert!(has_image_ref, "Should find an image placeholder for the SVG reference");
+
+        // Now test load_image directly to confirm SVG rasterization works
+        let img = load_image("logo.svg", &dir);
+        assert!(img.is_ok(), "load_image should rasterize SVG, got: {:?}", img.err());
+        let img = img.unwrap();
+        assert_eq!(img.width(), 100);
+        assert_eq!(img.height(), 100);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_image_svg_data_uri() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg.as_bytes());
+        let data_uri = format!("data:image/svg+xml;base64,{}", b64);
+
+        let result = load_image(&data_uri, std::path::Path::new("."));
+        assert!(result.is_ok(), "load_image should handle SVG data URIs but got: {:?}", result.err());
     }
 }

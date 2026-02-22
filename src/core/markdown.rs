@@ -11,7 +11,7 @@ pub fn parse_markdown(content: &str) -> String {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
-    options.render.unsafe_ = false;
+    options.render.unsafe_ = true;
 
     let html = markdown_to_html(content, &options);
     let html = add_heading_ids(&html);
@@ -151,7 +151,7 @@ mod tests {
         // The mermaid block should not remain as a raw code block with language-mermaid class
         // It should either be a rendered SVG diagram or a mermaid-error div
         assert!(
-            result.contains("mermaid-diagram") || result.contains("mermaid-error"),
+            result.contains("mermaid-diagram") || result.contains("mermaid-error") || result.contains("mermaid-fallback"),
             "Mermaid block should be processed, got: {}",
             result
         );
@@ -170,6 +170,34 @@ mod tests {
         let result = parse_markdown(md);
         assert!(result.contains("<code"));
         assert!(!result.contains("mermaid-diagram"));
+    }
+
+    // --- raw HTML image tests (bug: local images not showing) ---
+
+    #[test]
+    fn parse_markdown_raw_html_img_preserved() {
+        // Business docs often use raw HTML <img> tags for sizing
+        let md = r#"<img src="chart.png" alt="Revenue chart" width="600" />"#;
+        let result = parse_markdown(md);
+        assert!(result.contains("<img"), "Raw HTML <img> tags should be preserved, got: {}", result);
+        assert!(result.contains("chart.png"), "Image src should be preserved, got: {}", result);
+    }
+
+    #[test]
+    fn parse_markdown_raw_html_img_with_attributes() {
+        let md = r#"<p align="center"><img src="logo.png" alt="logo" width="200"/></p>"#;
+        let result = parse_markdown(md);
+        assert!(result.contains("<img"), "Centered HTML image should be preserved, got: {}", result);
+        assert!(result.contains("logo.png"), "Image src should be preserved, got: {}", result);
+    }
+
+    #[test]
+    fn parse_markdown_markdown_image_syntax_works() {
+        // Standard markdown images should always work
+        let md = "![alt text](image.png)";
+        let result = parse_markdown(md);
+        assert!(result.contains("<img"), "Markdown image should produce <img>, got: {}", result);
+        assert!(result.contains("image.png"), "Image src should be present, got: {}", result);
     }
 }
 
@@ -277,6 +305,24 @@ input[type="checkbox"] { margin-right: 0.5em; }
     background: var(--code-bg);
 }
 .mermaid-error strong { color: #f85149; }
+.mermaid-fallback {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 16px 0;
+    background: var(--code-bg);
+    overflow: hidden;
+}
+.mermaid-fallback-header {
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--blockquote);
+    border-bottom: 1px solid var(--border);
+    background: var(--sidebar-bg);
+}
+.mermaid-icon { margin-right: 6px; }
+.mermaid-fallback pre { margin: 0; border-radius: 0; }
+.mermaid-fallback code { font-size: 13px; color: var(--fg); }
 /* Search */
 .search-bar {
     position: fixed;

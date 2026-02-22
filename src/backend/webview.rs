@@ -61,27 +61,76 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     });
 }
 
-/// Resolve relative image paths to absolute file:// URLs for local file display.
+/// Resolve local image paths to inline base64 data URIs.
+/// wry's `with_html()` does not allow loading file:// URLs, so we must embed images directly.
+/// Handles both `<img src="...">` and `<img alt="..." src="...">` attribute orders.
 fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
     use regex::Regex;
-    let re = Regex::new(r#"<img\s+src="([^"]+)""#).unwrap();
+    // Match src="..." anywhere inside an <img> tag (handles any attribute order)
+    let re = Regex::new(r#"(<img\s[^>]*?)src="([^"]+)"([^>]*?>)"#).unwrap();
     re.replace_all(html, |caps: &regex::Captures| {
-        let src = &caps[1];
-        // Skip URLs (http://, https://, data:, file://)
+        let before_src = &caps[1];
+        let src = &caps[2];
+        let after_src = &caps[3];
+        // Skip URLs and existing data URIs
         if src.starts_with("http://") || src.starts_with("https://")
             || src.starts_with("data:") || src.starts_with("file://")
         {
             return caps[0].to_string();
         }
-        // Resolve relative path to absolute file:// URL
-        let abs_path = base_dir.join(src);
+        // URL-decode the src path (comrak may percent-encode spaces etc.)
+        let decoded_src = percent_decode(src);
+        // Resolve relative path and embed as base64 data URI
+        let abs_path = base_dir.join(&decoded_src);
         if abs_path.exists() {
-            format!("<img src=\"file://{}\"", abs_path.display())
-        } else {
-            caps[0].to_string()
+            if let Ok(data_uri) = file_to_data_uri(&abs_path) {
+                return format!("{}src=\"{}\"{}",  before_src, data_uri, after_src);
+            }
         }
+        caps[0].to_string()
     })
     .to_string()
+}
+
+/// Decode percent-encoded URL path components (e.g. %20 -> space).
+fn percent_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+            result.push('%');
+            result.push_str(&hex);
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Convert a local file to a base64 data URI string.
+fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime = match ext.to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+    let data = std::fs::read(path)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{};base64,{}", mime, b64))
 }
 
 fn build_toc_html(entries: &[toc::TocEntry]) -> String {
@@ -95,8 +144,21 @@ fn build_toc_html(entries: &[toc::TocEntry]) -> String {
     toc
 }
 
+/// Mermaid.js embedded at compile time — only injected when the Rust renderer fails.
+const MERMAID_JS: &str = include_str!("../../assets/mermaid.min.js");
+
 fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     let toc_html = build_toc_html(toc_entries);
+    // Only include mermaid.js if there are fallback blocks that need JS rendering
+    let mermaid_script = if body.contains(r#"class="mermaid""#) {
+        format!(
+            r#"<script>{}</script>
+<script>mermaid.initialize({{ startOnLoad: true, theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'default' }});</script>"#,
+            MERMAID_JS
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -232,10 +294,12 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
     }});
 }})();
 </script>
+{mermaid_script}
 </body>
 </html>"#,
         css = GITHUB_CSS,
         toc = toc_html,
-        body = body
+        body = body,
+        mermaid_script = mermaid_script
     )
 }

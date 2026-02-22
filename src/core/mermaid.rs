@@ -1,8 +1,37 @@
 use regex::Regex;
 
+/// Preprocess mermaid source to fix known incompatibilities with mermaid-rs-renderer.
+/// This increases the success rate of the native Rust renderer across all backends.
+fn preprocess_mermaid_source(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    for line in source.lines() {
+        let processed = line
+            // Replace HTML line breaks in node labels with spaces
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+            .replace("<br />", " ")
+            // Replace bidirectional arrows (not supported) with unidirectional
+            .replace("<-->", "---")
+            .replace("x--x", "---")
+            .replace("o--o", "---");
+        result.push_str(&processed);
+        result.push('\n');
+    }
+    result
+}
+
 /// Render a single mermaid diagram source to SVG.
-/// Catches panics from mermaid-rs-renderer (which can panic on some inputs).
+/// First preprocesses the source to fix common incompatibilities,
+/// then catches panics from mermaid-rs-renderer (which can panic on some inputs).
 pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
+    // Try with preprocessed source first (fixes common syntax issues)
+    let preprocessed = preprocess_mermaid_source(source);
+    let preprocessed_clone = preprocessed.clone();
+    match std::panic::catch_unwind(|| mermaid_rs_renderer::render(&preprocessed_clone)) {
+        Ok(Ok(svg)) => return Ok(svg),
+        _ => {}
+    }
+    // Fall back to original source (in case preprocessing made things worse)
     let source = source.to_string();
     match std::panic::catch_unwind(|| mermaid_rs_renderer::render(&source)) {
         Ok(Ok(svg)) => Ok(svg),
@@ -20,9 +49,8 @@ pub fn process_mermaid_blocks(html: &str) -> String {
         let source = html_decode(&caps[1]);
         match render_mermaid_to_svg(&source) {
             Ok(svg) => format!(r#"<div class="mermaid-diagram">{}</div>"#, svg),
-            Err(err) => format!(
-                r#"<div class="mermaid-error"><strong>Mermaid error:</strong> {}<pre><code>{}</code></pre></div>"#,
-                html_encode(&err),
+            Err(_) => format!(
+                r#"<pre class="mermaid">{}</pre>"#,
                 html_encode(&source)
             ),
         }
@@ -41,9 +69,9 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
         match render_mermaid_to_svg(source) {
             Ok(svg) => match svg_to_png_base64(&svg) {
                 Ok(b64) => format!("![mermaid diagram](data:image/png;base64,{})", b64),
-                Err(_) => format!("**Mermaid render error**: could not convert SVG to PNG\n\n```\n{}```", source),
+                Err(_) => format!("> **◇ Mermaid Diagram** *(SVG to PNG conversion failed)*\n\n```\n{}```", source),
             },
-            Err(err) => format!("**Mermaid error**: {}\n\n```\n{}```", err, source),
+            Err(_) => format!("> **◇ Mermaid Diagram** *(unsupported by native renderer)*\n\n```\n{}```", source),
         }
     })
     .to_string()
@@ -137,6 +165,32 @@ mod tests {
         assert_eq!(decoded, original);
     }
 
+    // --- preprocess_mermaid_source tests ---
+
+    #[test]
+    fn preprocess_removes_html_breaks() {
+        let source = "graph LR\n  A[Line 1<br/>Line 2]-->B";
+        let result = preprocess_mermaid_source(source);
+        assert!(!result.contains("<br/>"));
+        assert!(result.contains("Line 1 Line 2"));
+    }
+
+    #[test]
+    fn preprocess_converts_bidirectional_arrows() {
+        let source = "graph LR\n  A<-->B";
+        let result = preprocess_mermaid_source(source);
+        assert!(!result.contains("<-->"));
+        assert!(result.contains("A---B"));
+    }
+
+    #[test]
+    fn preprocess_leaves_valid_syntax_unchanged() {
+        let source = "graph LR\n  A-->B\n  B-->C";
+        let result = preprocess_mermaid_source(source);
+        assert!(result.contains("A-->B"));
+        assert!(result.contains("B-->C"));
+    }
+
     // --- render_mermaid_to_svg tests ---
 
     #[test]
@@ -202,8 +256,8 @@ mod tests {
             "Mermaid code block should be replaced, got: {}", result);
         // Should contain either a rendered diagram or an error
         assert!(
-            result.contains("mermaid-diagram") || result.contains("mermaid-error"),
-            "Should contain diagram or error div, got: {}",
+            result.contains("mermaid-diagram") || result.contains("mermaid-error") || result.contains("mermaid-fallback"),
+            "Should contain diagram or fallback div, got: {}",
             result
         );
         // Surrounding content should be preserved
@@ -223,8 +277,10 @@ mod tests {
         // Use obviously invalid mermaid that will produce an error
         let html = r#"<pre><code class="language-mermaid">not valid %%% !@#</code></pre>"#;
         let result = process_mermaid_blocks(html);
-        if result.contains("mermaid-error") {
-            // Error div should contain the original source (html-encoded)
+        if result.contains("mermaid-fallback") {
+            // Fallback div should contain the original source
+            assert!(result.contains("Mermaid Diagram"));
+        } else if result.contains("mermaid-error") {
             assert!(result.contains("Mermaid error:"));
         }
         // If it somehow renders successfully, that's also fine
