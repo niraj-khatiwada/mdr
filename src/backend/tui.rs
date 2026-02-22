@@ -540,6 +540,40 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
             ParsedLine::Text(line) => {
                 elements.push(ContentElement::TextLine(line));
             }
+            ParsedLine::MermaidRef { source } => {
+                // Try to render mermaid diagram as an image
+                match crate::core::mermaid::render_mermaid_to_svg(&source) {
+                    Ok(svg) => {
+                        match rasterize_svg(&svg) {
+                            Ok(dyn_img) => {
+                                if let Some(ref picker) = picker {
+                                    let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
+                                    let aspect = img_h as f64 / img_w as f64;
+                                    let target_cols = 60u16;
+                                    let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                                    let height = target_rows.clamp(2, 20);
+
+                                    let protocol = picker.new_resize_protocol(dyn_img);
+                                    elements.push(ContentElement::Image {
+                                        protocol,
+                                        _alt: "mermaid diagram".to_string(),
+                                        height,
+                                    });
+                                } else {
+                                    // No picker: fall back to code block display
+                                    push_mermaid_fallback_code(&mut elements, &source);
+                                }
+                            }
+                            Err(_) => {
+                                push_mermaid_fallback_code(&mut elements, &source);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        push_mermaid_fallback_code(&mut elements, &source);
+                    }
+                }
+            }
             ParsedLine::ImageRef { alt, url } => {
                 if let Some(ref picker) = picker {
                     match load_image(&url, base_dir) {
@@ -581,6 +615,25 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
     }
 
     elements
+}
+
+/// Push a mermaid code block as fallback text when rendering fails or no picker is available.
+fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) {
+    elements.push(ContentElement::TextLine(Line::from(Span::styled(
+        "┌─ mermaid ─────────────────────────────────┐".to_string(),
+        Style::default().fg(Color::DarkGray),
+    ))));
+    for line in source.lines() {
+        elements.push(ContentElement::TextLine(Line::from(Span::styled(
+            format!("│ {}", line),
+            Style::default().fg(Color::Green),
+        ))));
+    }
+    elements.push(ContentElement::TextLine(Line::from(Span::styled(
+        "└─────────────────────────────────────────┘".to_string(),
+        Style::default().fg(Color::DarkGray),
+    ))));
+    elements.push(ContentElement::TextLine(Line::from("")));
 }
 
 /// Load an image from a URL, data URI, or local file path.
@@ -673,45 +726,69 @@ fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::e
 enum ParsedLine {
     Text(Line<'static>),
     ImageRef { alt: String, url: String },
+    /// A mermaid diagram source extracted from a ```mermaid code block.
+    MermaidRef { source: String },
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
 fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
     let mut items = Vec::new();
     let mut in_code_block = false;
-    let mut code_lang = String::new();
     let mut in_table = false;
+    let mut in_mermaid_block = false;
+    let mut mermaid_source = String::new();
 
     for line in content.lines() {
         if line.starts_with("```") {
             if in_code_block {
-                in_code_block = false;
-                items.push(ParsedLine::Text(Line::from(Span::styled(
-                    "└─────────────────────────────────────────┘",
-                    Style::default().fg(Color::DarkGray),
-                ))));
-                items.push(ParsedLine::Text(Line::from("")));
+                if in_mermaid_block {
+                    // End of mermaid block: emit a MermaidRef instead of code lines
+                    in_mermaid_block = false;
+                    in_code_block = false;
+                    items.push(ParsedLine::MermaidRef { source: mermaid_source.clone() });
+                    mermaid_source.clear();
+                } else {
+                    in_code_block = false;
+                    items.push(ParsedLine::Text(Line::from(Span::styled(
+                        "└─────────────────────────────────────────┘",
+                        Style::default().fg(Color::DarkGray),
+                    ))));
+                    items.push(ParsedLine::Text(Line::from("")));
+                }
             } else {
                 in_code_block = true;
-                code_lang = line.trim_start_matches('`').to_string();
-                let header = if code_lang.is_empty() {
-                    "┌─ code ──────────────────────────────────┐".to_string()
+                let code_lang = line.trim_start_matches('`').trim().to_string();
+                if code_lang == "mermaid" {
+                    in_mermaid_block = true;
+                    mermaid_source.clear();
                 } else {
-                    format!("┌─ {} {}", code_lang, "─".repeat(38usize.saturating_sub(code_lang.len())))
-                };
-                items.push(ParsedLine::Text(Line::from(Span::styled(
-                    header,
-                    Style::default().fg(Color::DarkGray),
-                ))));
+                    let header = if code_lang.is_empty() {
+                        "┌─ code ──────────────────────────────────┐".to_string()
+                    } else {
+                        format!("┌─ {} {}", code_lang, "─".repeat(38usize.saturating_sub(code_lang.len())))
+                    };
+                    items.push(ParsedLine::Text(Line::from(Span::styled(
+                        header,
+                        Style::default().fg(Color::DarkGray),
+                    ))));
+                }
             }
             continue;
         }
 
         if in_code_block {
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                format!("│ {}", line),
-                Style::default().fg(Color::Green),
-            ))));
+            if in_mermaid_block {
+                // Accumulate mermaid source lines
+                if !mermaid_source.is_empty() {
+                    mermaid_source.push('\n');
+                }
+                mermaid_source.push_str(line);
+            } else {
+                items.push(ParsedLine::Text(Line::from(Span::styled(
+                    format!("│ {}", line),
+                    Style::default().fg(Color::Green),
+                ))));
+            }
             continue;
         }
 
@@ -1099,5 +1176,78 @@ mod tests {
 
         let result = load_image(&data_uri, std::path::Path::new("."));
         assert!(result.is_ok(), "load_image should handle SVG data URIs but got: {:?}", result.err());
+    }
+
+    #[test]
+    fn mermaid_block_produces_mermaid_ref() {
+        let md = "# Title\n\n```mermaid\ngraph LR\n  A-->B\n```\n\nSome text after.\n";
+        let items = markdown_to_lines_with_images(md);
+
+        let has_mermaid_ref = items.iter().any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
+        assert!(has_mermaid_ref, "Mermaid code block should produce a MermaidRef variant");
+
+        // Verify the source is captured correctly
+        let mermaid_source = items.iter().find_map(|item| {
+            if let ParsedLine::MermaidRef { source } = item {
+                Some(source.clone())
+            } else {
+                None
+            }
+        }).expect("Should have a MermaidRef");
+        assert!(mermaid_source.contains("graph LR"), "MermaidRef should contain the mermaid source, got: {}", mermaid_source);
+        assert!(mermaid_source.contains("A-->B"), "MermaidRef should contain the diagram content");
+    }
+
+    #[test]
+    fn mermaid_block_not_rendered_as_code_text() {
+        let md = "```mermaid\ngraph LR\n  A-->B\n```\n";
+        let items = markdown_to_lines_with_images(md);
+
+        // Should NOT have green code lines for mermaid content
+        let has_green_code = items.iter().any(|item| {
+            if let ParsedLine::Text(line) = item {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.contains("│ graph LR") || text.contains("│   A-->B")
+            } else {
+                false
+            }
+        });
+        assert!(!has_green_code, "Mermaid content should NOT appear as regular code text");
+    }
+
+    #[test]
+    fn non_mermaid_code_block_unchanged() {
+        let md = "```rust\nfn main() {}\n```\n";
+        let items = markdown_to_lines_with_images(md);
+
+        let has_mermaid_ref = items.iter().any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
+        assert!(!has_mermaid_ref, "Non-mermaid code blocks should NOT produce MermaidRef");
+
+        // Should have regular code text
+        let has_code_text = items.iter().any(|item| {
+            if let ParsedLine::Text(line) = item {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.contains("│ fn main()")
+            } else {
+                false
+            }
+        });
+        assert!(has_code_text, "Non-mermaid code should appear as regular code text");
+    }
+
+    #[test]
+    fn mermaid_build_content_elements_fallback_without_picker() {
+        // Without a picker, mermaid should fall back to code block display
+        let md = "```mermaid\ngraph LR\n  A-->B\n```\n";
+        let md_path = std::path::PathBuf::from("/tmp/test_mermaid.md");
+        let elements = build_content_elements(md, &md_path, &None);
+
+        // Without picker, mermaid rendering should either produce TextLines (fallback)
+        // or ImagePlaceholder - but NOT be empty
+        assert!(!elements.is_empty(), "Should produce content elements for mermaid block");
+
+        // Check that we have some text lines (the fallback code display)
+        let has_text = elements.iter().any(|e| matches!(e, ContentElement::TextLine(_)));
+        assert!(has_text, "Mermaid fallback should produce text lines");
     }
 }
