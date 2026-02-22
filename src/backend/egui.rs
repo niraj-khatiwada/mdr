@@ -176,6 +176,111 @@ impl eframe::App for MdrApp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- split_by_headings tests ---
+
+    #[test]
+    fn split_by_headings_single_heading() {
+        let md = "# Title\nSome content\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("# Title"));
+        assert!(sections[0].contains("Some content"));
+    }
+
+    #[test]
+    fn split_by_headings_multiple_headings() {
+        let md = "# First\nContent 1\n## Second\nContent 2\n### Third\nContent 3\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        assert_eq!(sections.len(), 3);
+        assert!(sections[0].contains("# First"));
+        assert!(sections[1].contains("## Second"));
+        assert!(sections[2].contains("### Third"));
+    }
+
+    #[test]
+    fn split_by_headings_with_preamble() {
+        let md = "Some introductory text.\n\n# First Heading\nContent here.\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(has_preamble);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].contains("Some introductory text."));
+        assert!(sections[1].contains("# First Heading"));
+    }
+
+    #[test]
+    fn split_by_headings_no_headings() {
+        let md = "Just some text.\nNo headings here.\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(has_preamble);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("Just some text."));
+    }
+
+    #[test]
+    fn split_by_headings_empty_input() {
+        let (has_preamble, sections) = split_by_headings("");
+        assert!(!has_preamble);
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn split_by_headings_hash_in_code_block_not_split() {
+        // Lines starting with # inside code are not headings if they lack
+        // the space after the # sequence. But the function checks for trimmed.starts_with(' ')
+        // so `# comment` inside code would still split. This tests that non-heading # lines
+        // (like shebang #!) are ignored.
+        let md = "# Title\n#!/bin/bash\necho hello\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        // The shebang line starts with #! which is filtered by !line.starts_with("#!")
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("#!/bin/bash"));
+    }
+
+    #[test]
+    fn split_by_headings_shebang_as_first_line() {
+        let md = "#!/bin/bash\n# Title\nContent\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        // First line is #!/bin/bash which is not a heading -> preamble
+        assert!(has_preamble);
+        assert_eq!(sections.len(), 2);
+    }
+
+    #[test]
+    fn split_by_headings_consecutive_headings() {
+        let md = "# H1\n## H2\n## H3\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        assert_eq!(sections.len(), 3);
+    }
+
+    #[test]
+    fn split_by_headings_heading_without_space_not_treated_as_heading() {
+        // "#notaheading" should not be treated as a heading (no space after #)
+        let md = "# Real Heading\n#notaheading\ntext\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        // #notaheading lacks space after #, so it doesn't split
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("#notaheading"));
+    }
+
+    #[test]
+    fn split_by_headings_preserves_content_within_sections() {
+        let md = "# Title\nLine 1\nLine 2\n\n## Next\nLine 3\n";
+        let (_, sections) = split_by_headings(md);
+        assert!(sections[0].contains("Line 1"));
+        assert!(sections[0].contains("Line 2"));
+        assert!(sections[1].contains("Line 3"));
+    }
+}
+
 /// Resolve relative image paths in markdown to absolute file:// URLs.
 /// Handles ![alt](relative/path.png) syntax.
 fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {

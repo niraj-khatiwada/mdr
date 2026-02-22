@@ -8,14 +8,41 @@ use crossterm::execute;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{Resize, StatefulImage};
+
 use crate::core::toc::{self, TocEntry};
+
+/// Represents a single line element in the rendered content.
+/// Lines can be either text (rendered as ratatui Lines) or images (rendered as StatefulImage).
+enum ContentElement {
+    TextLine(Line<'static>),
+    /// An image element that spans a number of rows in the terminal.
+    /// Stores the stateful protocol, alt text (for fallback), and the desired height in rows.
+    Image {
+        protocol: StatefulProtocol,
+        _alt: String,
+        height: u16,
+    },
+    /// Fallback placeholder when image loading fails.
+    ImagePlaceholder(Line<'static>),
+}
+
+impl ContentElement {
+    /// Returns the number of terminal rows this element occupies.
+    fn row_height(&self) -> u16 {
+        match self {
+            ContentElement::TextLine(_) => 1,
+            ContentElement::Image { height, .. } => *height,
+            ContentElement::ImagePlaceholder(_) => 1,
+        }
+    }
+}
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&file_path)?;
     let toc_entries = toc::extract_toc(&content);
-    let rendered = markdown_to_lines(&content);
-
-    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -24,12 +51,20 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Initialize the image picker for protocol detection.
+    // from_query_stdio should be called after entering the alternate screen.
+    let picker = Picker::from_query_stdio().ok();
+
+    let rendered = build_content_elements(&content, &file_path, &picker);
+    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
+
     let mut app = TuiApp {
         content,
         rendered,
         toc_entries,
         file_path,
         watcher_rx,
+        picker,
         scroll_offset: 0,
         toc_selected: 0,
         focus_toc: false,
@@ -38,14 +73,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Main loop
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         // Check for file changes
         if app.watcher_rx.try_recv().is_ok() {
             while app.watcher_rx.try_recv().is_ok() {}
             if let Ok(new_content) = std::fs::read_to_string(&app.file_path) {
                 app.toc_entries = toc::extract_toc(&new_content);
-                app.rendered = markdown_to_lines(&new_content);
+                app.rendered = build_content_elements(&new_content, &app.file_path, &app.picker);
                 app.content = new_content;
             }
         }
@@ -84,15 +119,15 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         app.scroll_offset = 0;
                     }
                     KeyCode::End | KeyCode::Char('G') => {
-                        app.scroll_offset = app.rendered.len().saturating_sub(1);
+                        let total_rows = total_content_rows(&app.rendered);
+                        app.scroll_offset = total_rows.saturating_sub(1);
                     }
                     KeyCode::Tab => {
                         app.focus_toc = !app.focus_toc;
                     }
                     KeyCode::Enter => {
                         if app.focus_toc {
-                            // Navigate to heading
-                            if let Some(offset) = find_heading_line(&app.rendered, &app.toc_entries, app.toc_selected) {
+                            if let Some(offset) = find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected) {
                                 app.scroll_offset = offset;
                                 app.focus_toc = false;
                             }
@@ -118,17 +153,23 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
 struct TuiApp {
     content: String,
-    rendered: Vec<Line<'static>>,
+    rendered: Vec<ContentElement>,
     toc_entries: Vec<TocEntry>,
     file_path: PathBuf,
     watcher_rx: Receiver<()>,
+    picker: Option<Picker>,
     scroll_offset: usize,
     toc_selected: usize,
     focus_toc: bool,
     should_quit: bool,
 }
 
-fn ui(f: &mut Frame, app: &TuiApp) {
+/// Calculate the total number of terminal rows occupied by all content elements.
+fn total_content_rows(elements: &[ContentElement]) -> usize {
+    elements.iter().map(|e| e.row_height() as usize).sum()
+}
+
+fn ui(f: &mut Frame, app: &mut TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -162,7 +203,7 @@ fn ui(f: &mut Frame, app: &TuiApp) {
             .title(" TOC ")
             .title_style(Style::default().bold()))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(">> ");
 
     let mut toc_state = ListState::default();
     if app.focus_toc {
@@ -170,40 +211,47 @@ fn ui(f: &mut Frame, app: &TuiApp) {
     }
     f.render_stateful_widget(toc, chunks[0], &mut toc_state);
 
-    // Main content
-    let content_height = chunks[1].height.saturating_sub(2) as usize; // minus borders
-    let max_scroll = app.rendered.len().saturating_sub(content_height);
+    // Main content area
+    let content_area = chunks[1];
+    let inner_area = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if !app.focus_toc {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(format!(" {} ", app.file_path.display()))
+        .title_style(Style::default().bold())
+        .inner(content_area);
+
+    let content_height = inner_area.height as usize;
+    let total_rows = total_content_rows(&app.rendered);
+    let max_scroll = total_rows.saturating_sub(content_height);
     let scroll = app.scroll_offset.min(max_scroll);
 
-    let visible_lines: Vec<Line> = app.rendered.iter()
-        .skip(scroll)
-        .take(content_height)
-        .cloned()
-        .collect();
+    // Draw the border block first
+    let scroll_info = format!(" {}/{} ", scroll + 1, total_rows.max(1));
+    let border_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if !app.focus_toc {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
+        .title(format!(" {} ", app.file_path.display()))
+        .title_style(Style::default().bold())
+        .title_bottom(Line::from(scroll_info).right_aligned());
+    f.render_widget(border_block, content_area);
 
-    let content_border_style = if !app.focus_toc {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let scroll_info = format!(" {}/{} ", scroll + 1, app.rendered.len().max(1));
-    let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(content_border_style)
-            .title(format!(" {} ", app.file_path.display()))
-            .title_style(Style::default().bold())
-            .title_bottom(Line::from(scroll_info).right_aligned()));
-
-    f.render_widget(paragraph, chunks[1]);
+    // Now render content elements within the inner area, respecting scroll offset
+    render_content_elements(f, inner_area, &mut app.rendered, scroll, content_height);
 
     // Help bar at bottom - use an overlay
     let help = " q: quit | Tab: switch focus | j/k: scroll | Enter: navigate | Space/PgDn: page down ";
     let help_area = Rect {
-        x: chunks[1].x + 1,
-        y: chunks[1].y + chunks[1].height - 1,
-        width: chunks[1].width.saturating_sub(2).min(help.len() as u16),
+        x: content_area.x + 1,
+        y: content_area.y + content_area.height - 1,
+        width: content_area.width.saturating_sub(2).min(help.len() as u16),
         height: 1,
     };
     let help_widget = Paragraph::new(help)
@@ -211,20 +259,230 @@ fn ui(f: &mut Frame, app: &TuiApp) {
     f.render_widget(help_widget, help_area);
 }
 
-/// Find the line index where a heading appears in the rendered output.
-fn find_heading_line(lines: &[Line], toc_entries: &[TocEntry], toc_index: usize) -> Option<usize> {
-    let entry = toc_entries.get(toc_index)?;
-    let search_text = &entry.text;
+/// Render content elements into the given area, handling scroll offset.
+/// This function iterates through elements, skipping rows according to the scroll offset,
+/// and renders visible text lines and images.
+fn render_content_elements(
+    f: &mut Frame,
+    area: Rect,
+    elements: &mut [ContentElement],
+    scroll: usize,
+    content_height: usize,
+) {
+    let mut rows_skipped: usize = 0;
+    let mut y_offset: u16 = 0;
+    let available_height = content_height as u16;
 
-    lines.iter().position(|line| {
-        let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        line_text.contains(search_text)
-    })
+    for element in elements.iter_mut() {
+        if y_offset >= available_height {
+            break;
+        }
+
+        let elem_height = element.row_height() as usize;
+
+        // Check if this element is before the scroll window
+        if rows_skipped + elem_height <= scroll {
+            rows_skipped += elem_height;
+            continue;
+        }
+
+        // This element is at least partially visible
+        let skip_within = if rows_skipped < scroll {
+            scroll - rows_skipped
+        } else {
+            0
+        };
+        rows_skipped += elem_height;
+
+        match element {
+            ContentElement::TextLine(line) => {
+                if skip_within == 0 {
+                    let line_area = Rect {
+                        x: area.x,
+                        y: area.y + y_offset,
+                        width: area.width,
+                        height: 1,
+                    };
+                    let p = Paragraph::new(line.clone());
+                    f.render_widget(p, line_area);
+                    y_offset += 1;
+                }
+                // If skip_within > 0 for a 1-row element, it's fully scrolled past
+            }
+            ContentElement::Image { protocol, height, .. } => {
+                // For simplicity, if an image is partially scrolled, skip it entirely
+                // (rendering a partial image is complex and not well supported)
+                if skip_within > 0 {
+                    continue;
+                }
+                let remaining = available_height - y_offset;
+                let render_height = (*height).min(remaining);
+                if render_height == 0 {
+                    continue;
+                }
+                let img_area = Rect {
+                    x: area.x,
+                    y: area.y + y_offset,
+                    width: area.width,
+                    height: render_height,
+                };
+                let image_widget = StatefulImage::default().resize(Resize::Fit(None));
+                f.render_stateful_widget(image_widget, img_area, protocol);
+                y_offset += render_height;
+            }
+            ContentElement::ImagePlaceholder(line) => {
+                if skip_within == 0 {
+                    let line_area = Rect {
+                        x: area.x,
+                        y: area.y + y_offset,
+                        width: area.width,
+                        height: 1,
+                    };
+                    let p = Paragraph::new(line.clone());
+                    f.render_widget(p, line_area);
+                    y_offset += 1;
+                }
+            }
+        }
+    }
 }
 
-/// Convert markdown content to styled ratatui Lines.
-fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+/// Find the row offset where a heading appears in the rendered output.
+fn find_heading_row(elements: &[ContentElement], toc_entries: &[TocEntry], toc_index: usize) -> Option<usize> {
+    let entry = toc_entries.get(toc_index)?;
+    let search_text = &entry.text;
+    let mut row_offset: usize = 0;
+
+    for element in elements {
+        match element {
+            ContentElement::TextLine(line) => {
+                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if line_text.contains(search_text) {
+                    return Some(row_offset);
+                }
+                row_offset += 1;
+            }
+            ContentElement::Image { height, .. } => {
+                row_offset += *height as usize;
+            }
+            ContentElement::ImagePlaceholder(line) => {
+                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if line_text.contains(search_text) {
+                    return Some(row_offset);
+                }
+                row_offset += 1;
+            }
+        }
+    }
+
+    None
+}
+
+/// Build content elements from markdown, loading images where possible.
+fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Picker>) -> Vec<ContentElement> {
+    let text_lines = markdown_to_lines_with_images(content);
+    let base_dir = file_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+    let mut elements = Vec::new();
+    for item in text_lines {
+        match item {
+            ParsedLine::Text(line) => {
+                elements.push(ContentElement::TextLine(line));
+            }
+            ParsedLine::ImageRef { alt, url } => {
+                if let Some(ref picker) = picker {
+                    match load_image(&url, base_dir) {
+                        Ok(dyn_img) => {
+                            // Calculate image height in rows. Use a reasonable default:
+                            // aim for ~15 rows max, preserving aspect ratio relative to width.
+                            let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
+                            let aspect = img_h as f64 / img_w as f64;
+                            // Assume roughly 80 columns available, and font aspect ~2:1
+                            let target_cols = 60u16;
+                            let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                            let height = target_rows.clamp(2, 20);
+
+                            let protocol = picker.new_resize_protocol(dyn_img);
+                            elements.push(ContentElement::Image {
+                                protocol,
+                                _alt: alt,
+                                height,
+                            });
+                        }
+                        Err(_) => {
+                            let label = if alt.is_empty() { "image".to_string() } else { alt };
+                            elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
+                                format!("[Image: {}]", label),
+                                Style::default().fg(Color::Magenta).italic(),
+                            ))));
+                        }
+                    }
+                } else {
+                    // No picker available (terminal doesn't support image protocols or detection failed)
+                    let label = if alt.is_empty() { "image".to_string() } else { alt };
+                    elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
+                        format!("[Image: {}]", label),
+                        Style::default().fg(Color::Magenta).italic(),
+                    ))));
+                }
+            }
+        }
+    }
+
+    elements
+}
+
+/// Load an image from a URL, data URI, or local file path.
+fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    if url.starts_with("data:") {
+        // data: URI - decode base64
+        load_image_from_data_uri(url)
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        // HTTP fetch
+        load_image_from_http(url)
+    } else {
+        // Local file path (resolve relative to markdown file's directory)
+        let path = if std::path::Path::new(url).is_absolute() {
+            PathBuf::from(url)
+        } else {
+            base_dir.join(url)
+        };
+        let img = image::open(&path)?;
+        Ok(img)
+    }
+}
+
+/// Load an image from a data: URI by decoding the base64 payload.
+fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    // Format: data:[<mediatype>][;base64],<data>
+    let comma_pos = uri.find(',').ok_or("Invalid data URI: no comma found")?;
+    let data_part = &uri[comma_pos + 1..];
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data_part,
+    )?;
+    let img = image::load_from_memory(&decoded)?;
+    Ok(img)
+}
+
+/// Load an image from an HTTP(S) URL using ureq.
+fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    let response = ureq::get(url).call()?;
+    let mut bytes = Vec::new();
+    response.into_reader().read_to_end(&mut bytes)?;
+    let img = image::load_from_memory(&bytes)?;
+    Ok(img)
+}
+
+/// Intermediate representation for parsed markdown lines.
+enum ParsedLine {
+    Text(Line<'static>),
+    ImageRef { alt: String, url: String },
+}
+
+/// Convert markdown content to a mix of styled text lines and image references.
+fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
+    let mut items = Vec::new();
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut in_table = false;
@@ -233,11 +491,11 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
         if line.starts_with("```") {
             if in_code_block {
                 in_code_block = false;
-                lines.push(Line::from(Span::styled(
+                items.push(ParsedLine::Text(Line::from(Span::styled(
                     "└─────────────────────────────────────────┘",
                     Style::default().fg(Color::DarkGray),
-                )));
-                lines.push(Line::from(""));
+                ))));
+                items.push(ParsedLine::Text(Line::from("")));
             } else {
                 in_code_block = true;
                 code_lang = line.trim_start_matches('`').to_string();
@@ -246,72 +504,72 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
                 } else {
                     format!("┌─ {} {}", code_lang, "─".repeat(38usize.saturating_sub(code_lang.len())))
                 };
-                lines.push(Line::from(Span::styled(
+                items.push(ParsedLine::Text(Line::from(Span::styled(
                     header,
                     Style::default().fg(Color::DarkGray),
-                )));
+                ))));
             }
             continue;
         }
 
         if in_code_block {
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 format!("│ {}", line),
                 Style::default().fg(Color::Green),
-            )));
+            ))));
             continue;
         }
 
         // Headings
         if line.starts_with("# ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from("")));
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 line[2..].to_string(),
                 Style::default().fg(Color::Cyan).bold().underlined(),
-            )));
-            lines.push(Line::from(Span::styled(
+            ))));
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 "═".repeat(line.len().saturating_sub(2).min(60)),
                 Style::default().fg(Color::Cyan),
-            )));
-            lines.push(Line::from(""));
+            ))));
+            items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
         if line.starts_with("## ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from("")));
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 line[3..].to_string(),
                 Style::default().fg(Color::Blue).bold(),
-            )));
-            lines.push(Line::from(Span::styled(
+            ))));
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 "─".repeat(line.len().saturating_sub(3).min(50)),
                 Style::default().fg(Color::Blue),
-            )));
-            lines.push(Line::from(""));
+            ))));
+            items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
         if line.starts_with("### ") {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from("")));
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 line[4..].to_string(),
                 Style::default().fg(Color::Yellow).bold(),
-            )));
-            lines.push(Line::from(""));
+            ))));
+            items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
         if line.starts_with("#### ") {
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 line[5..].to_string(),
                 Style::default().fg(Color::Magenta).bold(),
-            )));
+            ))));
             continue;
         }
 
         // Horizontal rule
         if line.starts_with("---") || line.starts_with("***") || line.starts_with("___") {
-            lines.push(Line::from(Span::styled(
+            items.push(ParsedLine::Text(Line::from(Span::styled(
                 "─".repeat(60),
                 Style::default().fg(Color::DarkGray),
-            )));
+            ))));
             continue;
         }
 
@@ -319,10 +577,10 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
         if line.contains('|') && line.trim().starts_with('|') {
             if line.contains("---") && !in_table {
                 in_table = true;
-                lines.push(Line::from(Span::styled(
+                items.push(ParsedLine::Text(Line::from(Span::styled(
                     line.to_string(),
                     Style::default().fg(Color::DarkGray),
-                )));
+                ))));
                 continue;
             }
             in_table = true;
@@ -338,7 +596,7 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
                 v.push(Span::styled(cell.to_string(), Style::default().fg(Color::White)));
                 v
             }).collect();
-            lines.push(Line::from(spans));
+            items.push(ParsedLine::Text(Line::from(spans)));
             continue;
         } else {
             in_table = false;
@@ -346,87 +604,87 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
 
         // Blockquote
         if line.starts_with("> ") {
-            lines.push(Line::from(vec![
+            items.push(ParsedLine::Text(Line::from(vec![
                 Span::styled("▎ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(line[2..].to_string(), Style::default().fg(Color::Gray).italic()),
-            ]));
+            ])));
             continue;
         }
 
         // Task list
         if line.trim_start().starts_with("- [x] ") {
             let indent = line.len() - line.trim_start().len();
-            lines.push(Line::from(vec![
+            items.push(ParsedLine::Text(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("☑ ", Style::default().fg(Color::Green)),
                 Span::styled(
                     line.trim_start()[6..].to_string(),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]));
+            ])));
             continue;
         }
         if line.trim_start().starts_with("- [ ] ") {
             let indent = line.len() - line.trim_start().len();
-            lines.push(Line::from(vec![
+            items.push(ParsedLine::Text(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("☐ ", Style::default().fg(Color::Yellow)),
                 Span::styled(line.trim_start()[6..].to_string(), Style::default()),
-            ]));
+            ])));
             continue;
         }
 
         // Unordered list
         if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
             let indent = line.len() - line.trim_start().len();
-            lines.push(Line::from(vec![
+            items.push(ParsedLine::Text(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("• ", Style::default().fg(Color::Cyan)),
                 Span::styled(
                     line.trim_start()[2..].to_string(),
                     Style::default(),
                 ),
-            ]));
+            ])));
             continue;
         }
 
         // Ordered list
         if let Some(rest) = try_parse_ordered_list(line) {
             let indent = line.len() - line.trim_start().len();
-            lines.push(Line::from(vec![
+            items.push(ParsedLine::Text(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled(rest.0.clone(), Style::default().fg(Color::Cyan)),
                 Span::styled(rest.1.clone(), Style::default()),
-            ]));
+            ])));
             continue;
         }
 
-        // Image: ![alt](url)
+        // Image: ![alt](url) on its own line
         if line.trim_start().starts_with("![") {
-            if let Some(alt) = extract_image_alt(line) {
-                let label = if alt.is_empty() { "image".to_string() } else { alt };
-                lines.push(Line::from(Span::styled(
-                    format!("[Image: {}]", label),
-                    Style::default().fg(Color::Magenta).italic(),
-                )));
+            if let Some((alt, url)) = extract_image_alt_and_url(line) {
+                items.push(ParsedLine::ImageRef { alt, url });
                 continue;
             }
         }
 
         // Regular text with inline formatting
-        lines.push(parse_inline_formatting(line));
+        items.push(ParsedLine::Text(parse_inline_formatting(line)));
     }
 
-    lines
+    items
 }
 
-/// Extract alt text from a markdown image line: ![alt](url)
-fn extract_image_alt(line: &str) -> Option<String> {
+/// Extract alt text and URL from a markdown image line: ![alt](url)
+fn extract_image_alt_and_url(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
     let start = trimmed.find("![")?;
     let rest = &trimmed[start + 2..];
-    let end = rest.find("](")?;
-    Some(rest[..end].to_string())
+    let bracket_end = rest.find("](")?;
+    let alt = rest[..bracket_end].to_string();
+    let after_bracket = &rest[bracket_end + 2..];
+    let paren_end = after_bracket.find(')')?;
+    let url = after_bracket[..paren_end].to_string();
+    Some((alt, url))
 }
 
 /// Try to parse an ordered list item, returns (number prefix, text)

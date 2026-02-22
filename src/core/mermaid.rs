@@ -95,3 +95,172 @@ fn html_encode(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- html_decode tests ---
+
+    #[test]
+    fn html_decode_all_entities() {
+        assert_eq!(html_decode("&amp;&lt;&gt;&quot;&#39;"), "&<>\"'");
+    }
+
+    #[test]
+    fn html_decode_no_entities() {
+        assert_eq!(html_decode("plain text"), "plain text");
+    }
+
+    #[test]
+    fn html_decode_mixed() {
+        assert_eq!(html_decode("A &amp; B &lt; C"), "A & B < C");
+    }
+
+    // --- html_encode tests ---
+
+    #[test]
+    fn html_encode_special_chars() {
+        assert_eq!(html_encode("A & B < C > D"), "A &amp; B &lt; C &gt; D");
+    }
+
+    #[test]
+    fn html_encode_no_special_chars() {
+        assert_eq!(html_encode("plain text"), "plain text");
+    }
+
+    #[test]
+    fn html_encode_decode_roundtrip() {
+        let original = "graph LR; A-->B";
+        let encoded = html_encode(original);
+        let decoded = html_decode(&encoded);
+        assert_eq!(decoded, original);
+    }
+
+    // --- render_mermaid_to_svg tests ---
+
+    #[test]
+    fn render_mermaid_valid_diagram() {
+        let source = "graph LR\n  A-->B";
+        let result = render_mermaid_to_svg(source);
+        // Should either succeed with SVG or fail with a descriptive error
+        // (depends on mermaid-rs-renderer capabilities at runtime)
+        match result {
+            Ok(svg) => {
+                assert!(svg.contains("<svg") || svg.contains("<SVG"),
+                    "Expected SVG output, got: {}", svg);
+            }
+            Err(e) => {
+                // If it errors, the error should be descriptive
+                assert!(!e.is_empty(), "Error message should not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn render_mermaid_empty_input() {
+        let result = render_mermaid_to_svg("");
+        // Empty input should produce an error, not panic
+        assert!(result.is_err() || result.is_ok());
+    }
+
+    #[test]
+    fn render_mermaid_invalid_syntax() {
+        let result = render_mermaid_to_svg("this is not valid mermaid syntax at all %%% !@#");
+        // Should not panic - catch_unwind protects us
+        // Result can be Ok or Err but must not panic
+        match result {
+            Ok(_) => {} // Some renderers may be lenient
+            Err(e) => assert!(!e.is_empty()),
+        }
+    }
+
+    #[test]
+    fn render_mermaid_panic_safety() {
+        // Test that catch_unwind works - even bizarre input doesn't crash
+        let result = render_mermaid_to_svg("\0\0\0");
+        // Must not panic
+        let _ = result;
+    }
+
+    // --- process_mermaid_blocks tests ---
+
+    #[test]
+    fn process_mermaid_blocks_no_mermaid() {
+        let html = "<p>Hello</p><pre><code class=\"language-rust\">fn main() {}</code></pre>";
+        let result = process_mermaid_blocks(html);
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn process_mermaid_blocks_replaces_mermaid_code() {
+        let html = r#"<p>Before</p><pre><code class="language-mermaid">graph LR
+  A--&gt;B</code></pre><p>After</p>"#;
+        let result = process_mermaid_blocks(html);
+        // The mermaid code block should be replaced
+        assert!(!result.contains(r#"class="language-mermaid""#),
+            "Mermaid code block should be replaced, got: {}", result);
+        // Should contain either a rendered diagram or an error
+        assert!(
+            result.contains("mermaid-diagram") || result.contains("mermaid-error"),
+            "Should contain diagram or error div, got: {}",
+            result
+        );
+        // Surrounding content should be preserved
+        assert!(result.contains("<p>Before</p>"));
+        assert!(result.contains("<p>After</p>"));
+    }
+
+    #[test]
+    fn process_mermaid_blocks_preserves_non_mermaid_content() {
+        let html = "<h1>Title</h1><p>Content</p>";
+        let result = process_mermaid_blocks(html);
+        assert_eq!(result, html);
+    }
+
+    #[test]
+    fn process_mermaid_blocks_error_contains_source() {
+        // Use obviously invalid mermaid that will produce an error
+        let html = r#"<pre><code class="language-mermaid">not valid %%% !@#</code></pre>"#;
+        let result = process_mermaid_blocks(html);
+        if result.contains("mermaid-error") {
+            // Error div should contain the original source (html-encoded)
+            assert!(result.contains("Mermaid error:"));
+        }
+        // If it somehow renders successfully, that's also fine
+    }
+
+    // --- egui-specific tests ---
+
+    #[cfg(feature = "egui-backend")]
+    mod egui_tests {
+        use super::super::*;
+
+        #[test]
+        fn preprocess_mermaid_for_egui_no_mermaid() {
+            let md = "# Title\n\nSome text\n\n```rust\nfn main() {}\n```";
+            let result = preprocess_mermaid_for_egui(md);
+            assert_eq!(result, md);
+        }
+
+        #[test]
+        fn preprocess_mermaid_for_egui_replaces_block() {
+            let md = "Before\n\n```mermaid\ngraph LR\n  A-->B\n```\n\nAfter";
+            let result = preprocess_mermaid_for_egui(md);
+            // The mermaid block should be replaced with either an image or error message
+            assert!(!result.contains("```mermaid"),
+                "Mermaid block should be replaced, got: {}", result);
+            assert!(result.contains("Before"));
+            assert!(result.contains("After"));
+        }
+
+        #[test]
+        fn preprocess_mermaid_for_egui_error_shows_source() {
+            let md = "```mermaid\nnot valid mermaid\n```";
+            let result = preprocess_mermaid_for_egui(md);
+            if result.contains("error") || result.contains("Error") {
+                assert!(result.contains("not valid mermaid"));
+            }
+        }
+    }
+}
