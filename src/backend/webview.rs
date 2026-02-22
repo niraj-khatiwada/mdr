@@ -63,6 +63,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Resolve local image paths to inline base64 data URIs.
 /// wry's `with_html()` does not allow loading file:// URLs, so we must embed images directly.
+/// SVG files are rasterized to PNG first (to avoid executing embedded scripts/links).
 /// Handles both `<img src="...">` and `<img alt="..." src="...">` attribute orders.
 fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
     use regex::Regex;
@@ -82,22 +83,21 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         // Resolve relative path
         let abs_path = base_dir.join(&decoded_src);
         if abs_path.exists() {
-            // For SVG files, inline the SVG content directly instead of base64
+            // For SVG files, rasterize to PNG then embed as data URI.
+            // We do NOT inline SVG directly because SVG can contain <a>, <script>,
+            // <style>, <foreignObject> that execute in the page context.
             let is_svg = abs_path.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("svg"))
                 .unwrap_or(false);
             if is_svg {
-                if let Ok(svg_content) = read_svg_for_inline(&abs_path) {
-                    return format!(
-                        r#"<div class="inline-svg" style="max-width:100%">{}</div>"#,
-                        svg_content
-                    );
+                if let Ok(png_data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
+                    let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
+                    return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
                 }
             }
-            // For non-SVG images, use base64 data URI as before
+            // For non-SVG images, use base64 data URI
             if let Ok(data_uri) = file_to_data_uri(&abs_path) {
-                // Rebuild the tag with the data URI replacing the src
                 let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
                 return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
             }
@@ -162,16 +162,58 @@ fn build_toc_html(entries: &[toc::TocEntry]) -> String {
 /// Mermaid.js embedded at compile time — only injected when the Rust renderer fails.
 const MERMAID_JS: &str = include_str!("../../assets/mermaid.min.js");
 
-/// Read an SVG file and return its content with XML declaration stripped.
-fn read_svg_for_inline(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(path)?;
-    // Strip XML declaration if present (<?xml ... ?>)
-    let svg_content = regex::Regex::new(r"<\?xml[^?]*\?>")
-        .unwrap()
-        .replace(&content, "")
-        .trim()
-        .to_string();
-    Ok(svg_content)
+/// Rasterize an SVG file to PNG and return as a base64 data URI.
+/// This is safer than inlining SVG because SVG can contain scripts, links, and styles
+/// that would execute in the page context and cause unwanted navigation/requests.
+fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    use std::sync::{Arc, OnceLock};
+
+    let svg_data = std::fs::read_to_string(path)?;
+
+    // Max pixel dimension to avoid memory issues
+    const MAX_DIM: f32 = 8192.0;
+
+    // Reuse font database across calls
+    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fontdb = FONTDB.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    });
+
+    let mut options = usvg::Options::default();
+    options.fontdb = Arc::clone(fontdb);
+    let tree = usvg::Tree::from_str(&svg_data, &options)?;
+    let size = tree.size();
+    let svg_w = size.width();
+    let svg_h = size.height();
+
+    if svg_w <= 0.0 || svg_h <= 0.0 {
+        return Err("SVG has zero dimensions".into());
+    }
+
+    // Scale 2x for retina, but cap at MAX_DIM
+    let ideal_scale = 2.0_f32;
+    let max_scale_w = MAX_DIM / svg_w;
+    let max_scale_h = MAX_DIM / svg_h;
+    let scale = ideal_scale.min(max_scale_w).min(max_scale_h);
+
+    let width = (svg_w * scale) as u32;
+    let height = (svg_h * scale) as u32;
+
+    if width == 0 || height == 0 {
+        return Err("SVG dimensions too small after scaling".into());
+    }
+
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .ok_or("Failed to create pixmap")?;
+    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let png_data = pixmap.encode_png()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    Ok(format!("data:image/png;base64,{}", b64))
 }
 
 fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
@@ -336,41 +378,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_local_images_inlines_svg() {
-        let dir = std::env::temp_dir().join("mdr_test_webview_svg_inline");
+    fn resolve_local_images_svg_rasterized_to_png() {
+        let dir = std::env::temp_dir().join("mdr_test_webview_svg_raster");
         std::fs::create_dir_all(&dir).unwrap();
 
         let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="red"/></svg>"#;
-        let svg_path = dir.join("test.svg");
-        std::fs::write(&svg_path, svg_content).unwrap();
+        std::fs::write(dir.join("test.svg"), svg_content).unwrap();
 
         let html = r#"<img src="test.svg" alt="test">"#;
         let result = resolve_local_images(html, &dir);
 
-        // SVG should be inlined, not converted to data URI
-        assert!(!result.contains("data:image/svg+xml"), "SVG should not use data URI, got: {}", result);
-        assert!(result.contains(r#"<div class="inline-svg""#), "SVG should be wrapped in div, got: {}", result);
-        assert!(result.contains("<svg"), "SVG content should be inlined, got: {}", result);
-        assert!(!result.contains("<img"), "img tag should be replaced, got: {}", result);
+        // SVG should be rasterized to PNG data URI (not inlined as raw SVG)
+        assert!(result.contains("data:image/png;base64,"), "SVG should be rasterized to PNG, got: {}", result);
+        assert!(!result.contains("<svg"), "Raw SVG should NOT be inlined (security), got: {}", result);
+        assert!(result.contains("<img"), "Should remain an <img> tag with PNG data URI");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn resolve_local_images_svg_strips_xml_declaration() {
-        let dir = std::env::temp_dir().join("mdr_test_webview_svg_xmldecl");
+    fn resolve_local_images_svg_with_links_is_safe() {
+        // SVGs with <a> tags must NOT be inlined (they cause navigation)
+        let dir = std::env::temp_dir().join("mdr_test_webview_svg_links");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let svg_content = r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
-        let svg_path = dir.join("decl.svg");
-        std::fs::write(&svg_path, svg_content).unwrap();
+        let svg_with_links = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+<a href="https://example.com"><rect width="100" height="100" fill="blue"/></a></svg>"#;
+        std::fs::write(dir.join("logo.svg"), svg_with_links).unwrap();
 
-        let html = r#"<img src="decl.svg" alt="circle">"#;
+        let html = r#"<img src="logo.svg" alt="logo">"#;
         let result = resolve_local_images(html, &dir);
 
-        assert!(!result.contains("<?xml"), "XML declaration should be stripped, got: {}", result);
-        assert!(result.contains("<svg"), "SVG content should be present, got: {}", result);
+        // Must NOT contain raw SVG with links
+        assert!(!result.contains("href=\"https://example.com\""),
+            "SVG links must not leak into page, got: {}", result);
+        assert!(result.contains("data:image/png;base64,"),
+            "Should be rasterized to safe PNG, got: {}", result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -380,7 +423,6 @@ mod tests {
         let dir = std::env::temp_dir().join("mdr_test_webview_png_datauri");
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Create a minimal valid PNG (1x1 pixel)
         let png_path = dir.join("test.png");
         let mut img = image::RgbaImage::new(1, 1);
         img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
@@ -404,18 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn read_svg_for_inline_strips_xml_decl() {
-        let dir = std::env::temp_dir().join("mdr_test_read_svg_inline");
+    fn rasterize_svg_to_png_data_uri_basic() {
+        let dir = std::env::temp_dir().join("mdr_test_rasterize_svg");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let svg_with_decl = r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+        let svg = r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
         let path = dir.join("test.svg");
-        std::fs::write(&path, svg_with_decl).unwrap();
+        std::fs::write(&path, svg).unwrap();
 
-        let result = read_svg_for_inline(&path).unwrap();
-        assert!(!result.contains("<?xml"), "Should strip XML declaration");
-        assert!(result.starts_with("<svg"), "Should start with <svg tag");
+        let result = rasterize_svg_to_png_data_uri(&path).unwrap();
+        assert!(result.starts_with("data:image/png;base64,"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

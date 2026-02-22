@@ -78,10 +78,14 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
 }
 
 /// Convert SVG string to PNG and return as base64-encoded string.
+/// Scales down large SVGs to fit within GPU texture limits (max 8192px per side).
 #[cfg(feature = "egui-backend")]
 fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
     use std::sync::{Arc, OnceLock};
+
+    // Max texture size for egui/GPU — keep well under the 16384 hard limit
+    const MAX_TEXTURE_SIZE: u32 = 8192;
 
     // Load system fonts once and reuse across calls
     static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
@@ -95,16 +99,31 @@ fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
     options.fontdb = Arc::clone(fontdb);
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size();
-    let width = size.width() as u32;
-    let height = size.height() as u32;
+    let svg_w = size.width();
+    let svg_h = size.height();
+
+    if svg_w <= 0.0 || svg_h <= 0.0 {
+        return Err("SVG has zero dimensions".into());
+    }
+
+    // Scale down if either dimension exceeds the limit
+    let scale = {
+        let scale_w = MAX_TEXTURE_SIZE as f32 / svg_w;
+        let scale_h = MAX_TEXTURE_SIZE as f32 / svg_h;
+        scale_w.min(scale_h).min(1.0) // never scale up, only down
+    };
+
+    let width = (svg_w * scale) as u32;
+    let height = (svg_h * scale) as u32;
 
     if width == 0 || height == 0 {
-        return Err("SVG has zero dimensions".into());
+        return Err("SVG dimensions too small after scaling".into());
     }
 
     let mut pixmap = tiny_skia::Pixmap::new(width, height)
         .ok_or("Failed to create pixmap")?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
 
     let png_data = pixmap.encode_png()?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&png_data))
