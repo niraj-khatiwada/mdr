@@ -37,12 +37,33 @@ fn main() {
 ```mermaid
 graph TD
     A[Markdown File] --> B[Parser]
-    B --> C{Mermaid?}
-    C -->|Yes| D[Mermaid Renderer]
-    C -->|No| E[HTML/egui Renderer]
+    B --> C[Check Type]
+    C --> D[Mermaid Renderer]
+    C --> E[HTML/egui Renderer]
     D --> F[SVG Output]
     E --> G[Display]
     F --> G
+```
+
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    User->>MDR: Open file.md
+    MDR->>Comrak: Parse markdown
+    Comrak-->>MDR: HTML output
+    MDR->>Watcher: Watch file
+    Watcher-->>MDR: File changed
+    MDR->>MDR: Re-render
+```
+
+### Pie Chart
+
+```mermaid
+pie title Backend Usage
+    "egui" : 45
+    "WebView" : 35
+    "TUI" : 20
 ```
 
 ## Blockquote

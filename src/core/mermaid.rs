@@ -1,8 +1,14 @@
 use regex::Regex;
 
 /// Render a single mermaid diagram source to SVG.
+/// Catches panics from mermaid-rs-renderer (which can panic on some inputs).
 pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
-    mermaid_rs_renderer::render(source).map_err(|e| format!("{}", e))
+    let source = source.to_string();
+    match std::panic::catch_unwind(|| mermaid_rs_renderer::render(&source)) {
+        Ok(Ok(svg)) => Ok(svg),
+        Ok(Err(e)) => Err(format!("{}", e)),
+        Err(_) => Err("mermaid renderer panicked (unsupported diagram syntax)".to_string()),
+    }
 }
 
 /// Process HTML from comrak: find mermaid code blocks and replace with rendered SVG.
