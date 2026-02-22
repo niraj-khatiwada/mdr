@@ -2,14 +2,18 @@
 
 A lightweight, fast Markdown viewer with Mermaid diagram support and live reload. Built in Rust.
 
-## Why?
+## Why mdr?
 
-Developers working with LLMs constantly receive Markdown with code blocks, tables, and Mermaid diagrams. There's no simple `mdr file.md` command to view it all rendered properly.
+**Built for the LLM era.** AI tools generate Markdown constantly — code documentation, technical specs, analysis reports — packed with diagrams, tables, and structured content. You need a fast way to read them.
 
-- **Not an editor** — read-only viewer, opens instantly
-- **Not Electron** — native Rust binary, no Node.js, no npm
-- **Mermaid built-in** — diagrams render as SVG natively (no headless browser)
-- **Live reload** — edit your file, see changes instantly
+Most developers end up previewing Markdown in VS Code, pasting into a browser, or squinting at raw text in the terminal. None of these handle Mermaid diagrams. None are instant. mdr is.
+
+- **One command** — `mdr file.md` and you're reading, not editing
+- **Native Rust binary** — no Electron, no Node.js, no npm, starts in milliseconds
+- **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts rendered as SVG natively (no headless browser)
+- **Three backends** — full GUI (egui), native webview (WebKit/WebView2), or terminal UI (TUI) over SSH
+- **Live reload** — edit your file or let your AI tool regenerate it, see changes instantly
+- **In-document search** — Ctrl+F / `/` to find text across all backends
 
 ## Backends
 
@@ -41,6 +45,23 @@ cargo install --path . --no-default-features --features egui-backend
 cargo install --path . --no-default-features --features webview-backend
 ```
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew tap CleverCloud/misc
+brew install mdr
+```
+
+### Nix
+
+```bash
+nix run github:CleverCloud/mdr
+```
+
+### Pre-built binaries
+
+Download from the [Releases](https://github.com/CleverCloud/mdr/releases) page for macOS, Linux, and Windows.
+
 ## Usage
 
 ```bash
@@ -70,6 +91,9 @@ mdr --help
 | `G` / `End` | Go to bottom |
 | `Tab` | Switch focus between TOC and content |
 | `Enter` | Navigate to selected TOC heading |
+| `/` or `Ctrl+F` | Open search |
+| `n` | Next search match |
+| `N` | Previous search match |
 
 ## Features
 
@@ -105,6 +129,7 @@ src/
 │   ├── markdown.rs      # GFM parsing (comrak) + CSS
 │   ├── mermaid.rs       # Mermaid → SVG rendering
 │   ├── toc.rs           # Heading extraction for TOC
+│   ├── search.rs       # In-document search
 │   └── watcher.rs       # File watching (notify, 300ms debounce)
 └── backend/
     ├── egui.rs          # egui/eframe backend

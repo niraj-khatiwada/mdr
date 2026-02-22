@@ -3,6 +3,13 @@ name = "mdr"
 version = "0.1.0"
 edition = "2021"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
+license = "MIT"
+repository = "https://github.com/CleverCloud/mdr"
+homepage = "https://github.com/CleverCloud/mdr"
+readme = "README.md"
+authors = ["Clever Cloud <opensource@clever-cloud.com>"]
+categories = ["command-line-utilities", "text-processing"]
+keywords = ["markdown", "viewer", "mermaid", "tui", "webview"]
 
 [features]
 default = ["egui-backend", "webview-backend", "tui-backend"]
@@ -38,3 +45,15 @@ crossterm = { version = "0.28", optional = true }
 ratatui-image = { version = "4.1", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ureq = { version = "2", optional = true }
+
+[package.metadata.deb]
+section = "text"
+assets = [
+    ["target/release/mdr", "/usr/bin/mdr", "755"],
+]
+extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI)."
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/mdr", dest = "/usr/bin/mdr", mode = "0755" },
+]

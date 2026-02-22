@@ -69,6 +69,10 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         toc_selected: 0,
         focus_toc: false,
         should_quit: false,
+        search_mode: false,
+        search_query: String::new(),
+        search_matches: Vec::new(),
+        current_match_idx: 0,
     };
 
     // Main loop
@@ -88,52 +92,100 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // Poll events with 100ms timeout for file watching
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.should_quit = true;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if app.focus_toc {
-                            if app.toc_selected < app.toc_entries.len().saturating_sub(1) {
-                                app.toc_selected += 1;
-                            }
-                        } else {
-                            app.scroll_offset = app.scroll_offset.saturating_add(1);
+                if app.search_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.search_mode = false;
+                            app.search_query.clear();
+                            app.search_matches.clear();
+                            app.current_match_idx = 0;
                         }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if app.focus_toc {
-                            app.toc_selected = app.toc_selected.saturating_sub(1);
-                        } else {
-                            app.scroll_offset = app.scroll_offset.saturating_sub(1);
-                        }
-                    }
-                    KeyCode::PageDown | KeyCode::Char(' ') => {
-                        app.scroll_offset = app.scroll_offset.saturating_add(20);
-                    }
-                    KeyCode::PageUp => {
-                        app.scroll_offset = app.scroll_offset.saturating_sub(20);
-                    }
-                    KeyCode::Home | KeyCode::Char('g') => {
-                        app.scroll_offset = 0;
-                    }
-                    KeyCode::End | KeyCode::Char('G') => {
-                        let total_rows = total_content_rows(&app.rendered);
-                        app.scroll_offset = total_rows.saturating_sub(1);
-                    }
-                    KeyCode::Tab => {
-                        app.focus_toc = !app.focus_toc;
-                    }
-                    KeyCode::Enter => {
-                        if app.focus_toc {
-                            if let Some(offset) = find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected) {
-                                app.scroll_offset = offset;
-                                app.focus_toc = false;
+                        KeyCode::Enter => {
+                            if !app.search_matches.is_empty() {
+                                app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
+                                app.scroll_offset = app.search_matches[app.current_match_idx];
                             }
                         }
+                        KeyCode::Backspace => {
+                            app.search_query.pop();
+                            update_search_matches(&mut app);
+                        }
+                        KeyCode::Char(c) => {
+                            app.search_query.push(c);
+                            update_search_matches(&mut app);
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.should_quit = true;
+                        }
+                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.search_mode = true;
+                        }
+                        KeyCode::Char('/') => {
+                            app.search_mode = true;
+                        }
+                        KeyCode::Char('n') => {
+                            if !app.search_matches.is_empty() {
+                                app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
+                                app.scroll_offset = app.search_matches[app.current_match_idx];
+                            }
+                        }
+                        KeyCode::Char('N') => {
+                            if !app.search_matches.is_empty() {
+                                app.current_match_idx = if app.current_match_idx == 0 {
+                                    app.search_matches.len() - 1
+                                } else {
+                                    app.current_match_idx - 1
+                                };
+                                app.scroll_offset = app.search_matches[app.current_match_idx];
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.focus_toc {
+                                if app.toc_selected < app.toc_entries.len().saturating_sub(1) {
+                                    app.toc_selected += 1;
+                                }
+                            } else {
+                                app.scroll_offset = app.scroll_offset.saturating_add(1);
+                            }
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.focus_toc {
+                                app.toc_selected = app.toc_selected.saturating_sub(1);
+                            } else {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::PageDown | KeyCode::Char(' ') => {
+                            app.scroll_offset = app.scroll_offset.saturating_add(20);
+                        }
+                        KeyCode::PageUp => {
+                            app.scroll_offset = app.scroll_offset.saturating_sub(20);
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            app.scroll_offset = 0;
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            let total_rows = total_content_rows(&app.rendered);
+                            app.scroll_offset = total_rows.saturating_sub(1);
+                        }
+                        KeyCode::Tab => {
+                            app.focus_toc = !app.focus_toc;
+                        }
+                        KeyCode::Enter => {
+                            if app.focus_toc {
+                                if let Some(offset) = find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected) {
+                                    app.scroll_offset = offset;
+                                    app.focus_toc = false;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -162,6 +214,45 @@ struct TuiApp {
     toc_selected: usize,
     focus_toc: bool,
     should_quit: bool,
+    search_mode: bool,
+    search_query: String,
+    search_matches: Vec<usize>,
+    current_match_idx: usize,
+}
+
+fn update_search_matches(app: &mut TuiApp) {
+    app.search_matches.clear();
+    app.current_match_idx = 0;
+    if app.search_query.is_empty() {
+        return;
+    }
+    let query_lower = app.search_query.to_lowercase();
+    let mut row_offset: usize = 0;
+    for element in &app.rendered {
+        match element {
+            ContentElement::TextLine(line) => {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if text.to_lowercase().contains(&query_lower) {
+                    app.search_matches.push(row_offset);
+                }
+                row_offset += 1;
+            }
+            ContentElement::Image { height, .. } => {
+                row_offset += *height as usize;
+            }
+            ContentElement::ImagePlaceholder(line) => {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if text.to_lowercase().contains(&query_lower) {
+                    app.search_matches.push(row_offset);
+                }
+                row_offset += 1;
+            }
+        }
+    }
+    // Auto-scroll to first match
+    if !app.search_matches.is_empty() {
+        app.scroll_offset = app.search_matches[0];
+    }
 }
 
 /// Calculate the total number of terminal rows occupied by all content elements.
@@ -244,34 +335,57 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     f.render_widget(border_block, content_area);
 
     // Now render content elements within the inner area, respecting scroll offset
-    render_content_elements(f, inner_area, &mut app.rendered, scroll, content_height);
+    render_content_elements(f, inner_area, &mut app.rendered, scroll, content_height, &app.search_matches, app.current_match_idx);
 
-    // Help bar at bottom - use an overlay
-    let help = " q: quit | Tab: switch focus | j/k: scroll | Enter: navigate | Space/PgDn: page down ";
+    // Bottom bar
+    let bar_text = if app.search_mode {
+        let match_info = if app.search_matches.is_empty() {
+            if app.search_query.is_empty() { String::new() }
+            else { " (no matches)".to_string() }
+        } else {
+            format!(" ({}/{})", app.current_match_idx + 1, app.search_matches.len())
+        };
+        format!(" /{}{}  [Enter: next | Esc: close]", app.search_query, match_info)
+    } else if !app.search_matches.is_empty() {
+        format!(" Search: '{}' ({}/{})  [n/N: next/prev | /: search]",
+            app.search_query, app.current_match_idx + 1, app.search_matches.len())
+    } else {
+        " q: quit | Tab: switch focus | j/k: scroll | /: search | Space/PgDn: page down ".to_string()
+    };
+
     let help_area = Rect {
         x: content_area.x + 1,
         y: content_area.y + content_area.height - 1,
-        width: content_area.width.saturating_sub(2).min(help.len() as u16),
+        width: content_area.width.saturating_sub(2).min(bar_text.len() as u16),
         height: 1,
     };
-    let help_widget = Paragraph::new(help)
-        .style(Style::default().fg(Color::DarkGray));
+
+    let bar_style = if app.search_mode {
+        Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 40))
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let help_widget = Paragraph::new(bar_text).style(bar_style);
     f.render_widget(help_widget, help_area);
 }
 
 /// Render content elements into the given area, handling scroll offset.
 /// This function iterates through elements, skipping rows according to the scroll offset,
-/// and renders visible text lines and images.
+/// and renders visible text lines and images. Search matches are highlighted.
 fn render_content_elements(
     f: &mut Frame,
     area: Rect,
     elements: &mut [ContentElement],
     scroll: usize,
     content_height: usize,
+    search_matches: &[usize],
+    current_match: usize,
 ) {
     let mut rows_skipped: usize = 0;
     let mut y_offset: u16 = 0;
     let available_height = content_height as u16;
+    // Track absolute row offset for each element (independent of scroll)
+    let mut absolute_row: usize = 0;
 
     for element in elements.iter_mut() {
         if y_offset >= available_height {
@@ -279,6 +393,8 @@ fn render_content_elements(
         }
 
         let elem_height = element.row_height() as usize;
+        let current_absolute_row = absolute_row;
+        absolute_row += elem_height;
 
         // Check if this element is before the scroll window
         if rows_skipped + elem_height <= scroll {
@@ -303,8 +419,26 @@ fn render_content_elements(
                         width: area.width,
                         height: 1,
                     };
-                    let p = Paragraph::new(line.clone());
-                    f.render_widget(p, line_area);
+                    // Check if this line matches search
+                    let is_match = search_matches.contains(&current_absolute_row);
+                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
+
+                    if is_current {
+                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
+                        }).collect::<Vec<_>>());
+                        let p = Paragraph::new(highlighted_line);
+                        f.render_widget(p, line_area);
+                    } else if is_match {
+                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
+                        }).collect::<Vec<_>>());
+                        let p = Paragraph::new(highlighted_line);
+                        f.render_widget(p, line_area);
+                    } else {
+                        let p = Paragraph::new(line.clone());
+                        f.render_widget(p, line_area);
+                    }
                     y_offset += 1;
                 }
                 // If skip_within > 0 for a 1-row element, it's fully scrolled past
@@ -338,8 +472,25 @@ fn render_content_elements(
                         width: area.width,
                         height: 1,
                     };
-                    let p = Paragraph::new(line.clone());
-                    f.render_widget(p, line_area);
+                    let is_match = search_matches.contains(&current_absolute_row);
+                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
+
+                    if is_current {
+                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
+                        }).collect::<Vec<_>>());
+                        let p = Paragraph::new(highlighted_line);
+                        f.render_widget(p, line_area);
+                    } else if is_match {
+                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
+                        }).collect::<Vec<_>>());
+                        let p = Paragraph::new(highlighted_line);
+                        f.render_widget(p, line_area);
+                    } else {
+                        let p = Paragraph::new(line.clone());
+                        f.render_widget(p, line_area);
+                    }
                     y_offset += 1;
                 }
             }

@@ -42,6 +42,10 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 watcher_rx,
                 toc_entries,
                 scroll_to_section: None,
+                search_active: false,
+                search_query: String::new(),
+                search_section_matches: Vec::new(),
+                current_match: 0,
             }))
         }),
     )
@@ -92,6 +96,10 @@ struct MdrApp {
     watcher_rx: Receiver<()>,
     toc_entries: Vec<TocEntry>,
     scroll_to_section: Option<usize>,
+    search_active: bool,
+    search_query: String,
+    search_section_matches: Vec<usize>,
+    current_match: usize,
 }
 
 impl eframe::App for MdrApp {
@@ -113,6 +121,80 @@ impl eframe::App for MdrApp {
         // Ensure we have enough caches
         while self.caches.len() < self.sections.len() {
             self.caches.push(CommonMarkCache::default());
+        }
+
+        // Handle Ctrl+F for search
+        if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+            self.search_active = !self.search_active;
+            if !self.search_active {
+                self.search_query.clear();
+                self.search_section_matches.clear();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.search_active {
+            self.search_active = false;
+            self.search_query.clear();
+            self.search_section_matches.clear();
+        }
+
+        // Search bar panel
+        if self.search_active {
+            egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    let response = ui.text_edit_singleline(&mut self.search_query);
+                    if response.changed() {
+                        // Update matches
+                        self.search_section_matches.clear();
+                        self.current_match = 0;
+                        if !self.search_query.is_empty() {
+                            let query_lower = self.search_query.to_lowercase();
+                            for (i, section) in self.sections.iter().enumerate() {
+                                if section.to_lowercase().contains(&query_lower) {
+                                    self.search_section_matches.push(i);
+                                }
+                            }
+                            if !self.search_section_matches.is_empty() {
+                                self.scroll_to_section = Some(self.search_section_matches[0]);
+                            }
+                        }
+                    }
+                    // Request focus on first show
+                    if response.gained_focus() || ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+                        response.request_focus();
+                    }
+
+                    let match_text = if self.search_section_matches.is_empty() {
+                        if self.search_query.is_empty() { "".to_string() }
+                        else { "No matches".to_string() }
+                    } else {
+                        format!("{}/{}", self.current_match + 1, self.search_section_matches.len())
+                    };
+                    ui.label(&match_text);
+
+                    if ui.button("\u{25B2}").clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.shift) && self.search_active) {
+                        if !self.search_section_matches.is_empty() {
+                            self.current_match = if self.current_match == 0 {
+                                self.search_section_matches.len() - 1
+                            } else {
+                                self.current_match - 1
+                            };
+                            self.scroll_to_section = Some(self.search_section_matches[self.current_match]);
+                        }
+                    }
+                    if ui.button("\u{25BC}").clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && self.search_active) {
+                        if !self.search_section_matches.is_empty() {
+                            self.current_match = (self.current_match + 1) % self.search_section_matches.len();
+                            self.scroll_to_section = Some(self.search_section_matches[self.current_match]);
+                        }
+                    }
+                    if ui.button("\u{2715}").clicked() {
+                        self.search_active = false;
+                        self.search_query.clear();
+                        self.search_section_matches.clear();
+                    }
+                });
+            });
         }
 
         // TOC sidebar

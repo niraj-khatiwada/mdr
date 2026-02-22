@@ -127,6 +127,111 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
     }}
 }});
 </script>
+<div class="search-bar" id="searchBar" style="display:none;">
+    <input type="text" id="searchInput" placeholder="Search..." />
+    <span class="search-info" id="searchInfo">0/0</span>
+    <button onclick="searchNav(-1)">&#9650;</button>
+    <button onclick="searchNav(1)">&#9660;</button>
+    <button class="close-btn" onclick="closeSearch()">Esc</button>
+</div>
+<script>
+(function() {{
+    var matches = [];
+    var currentIdx = -1;
+
+    function clearHighlights() {{
+        document.querySelectorAll('mark.search-highlight').forEach(function(m) {{
+            var parent = m.parentNode;
+            parent.replaceChild(document.createTextNode(m.textContent), m);
+            parent.normalize();
+        }});
+        matches = [];
+        currentIdx = -1;
+    }}
+
+    function highlightMatches(query) {{
+        clearHighlights();
+        if (!query) {{ updateInfo(); return; }}
+        var walker = document.createTreeWalker(
+            document.querySelector('.content'),
+            NodeFilter.SHOW_TEXT, null, false
+        );
+        var textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+        var queryLower = query.toLowerCase();
+        for (var i = textNodes.length - 1; i >= 0; i--) {{
+            var node = textNodes[i];
+            var text = node.textContent;
+            var textLower = text.toLowerCase();
+            var idx = textLower.lastIndexOf(queryLower);
+            while (idx >= 0) {{
+                var range = document.createRange();
+                range.setStart(node, idx);
+                range.setEnd(node, idx + query.length);
+                var mark = document.createElement('mark');
+                mark.className = 'search-highlight';
+                range.surroundContents(mark);
+                node = mark.previousSibling || node.parentNode.firstChild;
+                idx = idx > 0 ? node.textContent.toLowerCase().lastIndexOf(queryLower, idx - 1) : -1;
+            }}
+        }}
+        matches = document.querySelectorAll('mark.search-highlight');
+        if (matches.length > 0) {{ currentIdx = 0; goToCurrent(); }}
+        updateInfo();
+    }}
+
+    function goToCurrent() {{
+        document.querySelectorAll('mark.search-highlight.current').forEach(function(m) {{ m.classList.remove('current'); }});
+        if (matches.length > 0 && currentIdx >= 0) {{
+            matches[currentIdx].classList.add('current');
+            matches[currentIdx].scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+        }}
+    }}
+
+    function updateInfo() {{
+        var info = document.getElementById('searchInfo');
+        if (matches.length === 0) {{ info.textContent = '0/0'; }}
+        else {{ info.textContent = (currentIdx + 1) + '/' + matches.length; }}
+    }}
+
+    window.searchNav = function(dir) {{
+        if (matches.length === 0) return;
+        currentIdx = (currentIdx + dir + matches.length) % matches.length;
+        goToCurrent();
+        updateInfo();
+    }};
+
+    window.closeSearch = function() {{
+        document.getElementById('searchBar').style.display = 'none';
+        clearHighlights();
+        updateInfo();
+    }};
+
+    document.addEventListener('keydown', function(e) {{
+        if ((e.ctrlKey || e.metaKey) && e.key === 'f') {{
+            e.preventDefault();
+            var bar = document.getElementById('searchBar');
+            bar.style.display = 'flex';
+            var input = document.getElementById('searchInput');
+            input.focus();
+            input.select();
+        }}
+        if (e.key === 'Escape') {{
+            window.closeSearch();
+        }}
+        if (e.key === 'Enter' && document.activeElement === document.getElementById('searchInput')) {{
+            e.preventDefault();
+            if (e.shiftKey) {{ window.searchNav(-1); }}
+            else {{ window.searchNav(1); }}
+        }}
+    }});
+
+    document.getElementById('searchInput').addEventListener('input', function() {{
+        highlightMatches(this.value);
+    }});
+}})();
+</script>
 </body>
 </html>"#,
         css = GITHUB_CSS,
