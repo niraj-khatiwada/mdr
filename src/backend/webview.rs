@@ -48,10 +48,13 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
 
+    let (icon_rgba, icon_w, icon_h) = crate::core::icon::load_icon_rgba();
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title(format!("mdr - {}", file_path.display()))
         .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 900.0))
+        .with_window_icon(Some(tao::window::Icon::from_rgba(icon_rgba, icon_w, icon_h).unwrap()))
         .build(&event_loop)?;
 
     let webview = WebViewBuilder::new()

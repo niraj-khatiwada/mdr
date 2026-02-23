@@ -1,3 +1,4 @@
+pub mod icon;
 pub mod markdown;
 pub mod mermaid;
 pub mod search;

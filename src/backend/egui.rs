@@ -26,10 +26,17 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
 
+    let (icon_rgba, icon_w, icon_h) = crate::core::icon::load_icon_rgba();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 900.0])
-            .with_title(format!("mdr - {}", file_path.display())),
+            .with_title(format!("mdr - {}", file_path.display()))
+            .with_icon(egui::IconData {
+                rgba: icon_rgba,
+                width: icon_w,
+                height: icon_h,
+            }),
         ..Default::default()
     };
 
