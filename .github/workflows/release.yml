@@ -285,6 +285,155 @@ jobs:
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ steps.version.outputs.version }}"
 
+  update-chocolatey:
+    name: Update Chocolatey
+    needs: release
+    runs-on: windows-latest
+    if: ${{ vars.CHOCOLATEY_ENABLED == 'true' }}
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mdr-x86_64-pc-windows-msvc.zip
+          path: artifacts
+
+      - name: Extract version
+        id: version
+        shell: pwsh
+        run: echo "version=$("$env:GITHUB_REF_NAME" -replace '^v','')" >> $env:GITHUB_OUTPUT
+
+      - name: Compute SHA256
+        id: sha
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash artifacts/mdr-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
+          echo "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Generate nuspec and install script
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          mkdir choco-pkg/tools
+
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.chocolatey.org/2015/06/nuspec">
+            <metadata>
+              <id>mdr</id>
+              <version>$env:VERSION</version>
+              <title>mdr</title>
+              <authors>Clever Cloud</authors>
+              <owners>CleverCloud</owners>
+              <summary>A lightweight Markdown viewer with live reload</summary>
+              <description>A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI).</description>
+              <projectUrl>https://github.com/CleverCloud/mdr</projectUrl>
+              <tags>markdown viewer mermaid tui</tags>
+              <licenseUrl>https://github.com/CleverCloud/mdr/blob/main/LICENSE</licenseUrl>
+              <requireLicenseAcceptance>false</requireLicenseAcceptance>
+            </metadata>
+          </package>
+          "@ | Out-File -Encoding utf8 choco-pkg/mdr.nuspec
+
+          @"
+          `$ErrorActionPreference = 'Stop'
+          `$url = "https://github.com/CleverCloud/mdr/releases/download/v$env:VERSION/mdr-x86_64-pc-windows-msvc.zip"
+          `$checksum = "$env:SHA256"
+          Install-ChocolateyZipPackage -PackageName 'mdr' -Url64bit `$url -Checksum64 `$checksum -ChecksumType64 'sha256' -UnzipLocation "`$(Split-Path -Parent `$MyInvocation.MyCommand.Definition)"
+          "@ | Out-File -Encoding utf8 choco-pkg/tools/chocolateyInstall.ps1
+
+      - name: Pack and push
+        shell: pwsh
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          cd choco-pkg
+          choco pack mdr.nuspec
+          choco push (Get-Item *.nupkg).Name --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
+
+  update-scoop:
+    name: Update Scoop bucket
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ vars.SCOOP_ENABLED == 'true' }}
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mdr-x86_64-pc-windows-msvc.zip
+          path: artifacts
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Compute SHA256
+        id: sha
+        run: echo "sha256=$(sha256sum artifacts/mdr-x86_64-pc-windows-msvc.zip | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Generate and push manifest
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          cat > mdr.json << EOF
+          {
+            "version": "${VERSION}",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/CleverCloud/mdr/releases/download/v${VERSION}/mdr-x86_64-pc-windows-msvc.zip",
+                "hash": "${SHA256}"
+              }
+            },
+            "bin": "mdr.exe",
+            "checkver": {
+              "github": "https://github.com/CleverCloud/mdr"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/CleverCloud/mdr/releases/download/v\$version/mdr-x86_64-pc-windows-msvc.zip"
+                }
+              }
+            },
+            "homepage": "https://github.com/CleverCloud/mdr",
+            "license": "MIT",
+            "description": "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple backends"
+          }
+          EOF
+
+          git clone "https://x-access-token:${SCOOP_BUCKET_TOKEN}@github.com/CleverCloud/scoop-bucket.git" bucket
+          mkdir -p bucket/bucket
+          cp mdr.json bucket/bucket/mdr.json
+          cd bucket
+          git config user.email "opensource@clever-cloud.com"
+          git config user.name "Clever Cloud CI"
+          git add bucket/mdr.json
+          git diff --cached --quiet || git commit -m "Update mdr to ${VERSION}"
+          git push
+
+  update-snap:
+    name: Publish to Snap Store
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ vars.SNAP_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        id: build
+
+      - name: Publish to Snap Store
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: edge
+
   release:
     name: Create Release
     needs: [build, build-deb, build-rpm]

@@ -1,0 +1,41 @@
+name: mdr-markdown-renderer
+base: core22
+adopt-info: mdr
+summary: A lightweight Markdown viewer with live reload
+description: |
+  A lightweight Markdown viewer with Mermaid diagram support,
+  live reload, and multiple rendering backends (egui, webview, TUI).
+grade: stable
+confinement: strict
+
+apps:
+  mdr-markdown-renderer:
+    command: bin/mdr
+    aliases: [mdr]
+    plugs:
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - home
+      - network
+      - browser-support
+      - opengl
+
+parts:
+  mdr:
+    plugin: rust
+    source: .
+    build-packages:
+      - libgtk-3-dev
+      - libwebkit2gtk-4.1-dev
+      - libxdo-dev
+      - libgl1-mesa-dev
+    stage-packages:
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0
+      - libxdo3
+      - libgl1
+    override-pull: |
+      craftctl default
+      craftctl set version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"

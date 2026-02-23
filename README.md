@@ -58,6 +58,31 @@ brew tap CleverCloud/misc
 brew install mdr
 ```
 
+### Snap (Linux)
+
+```bash
+sudo snap install mdr-markdown-renderer
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add clevercloud https://github.com/CleverCloud/scoop-bucket
+scoop install mdr
+```
+
+### Chocolatey (Windows)
+
+```powershell
+choco install mdr
+```
+
+### WinGet (Windows)
+
+```powershell
+winget install CleverCloud.mdr
+```
+
 ### Nix
 
 ```bash
